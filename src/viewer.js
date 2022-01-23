@@ -8,6 +8,9 @@ import {
   GridHelper,
   HemisphereLight,
   LinearEncoding,
+  // PEDRO_BEGIN
+  LinearFilter,
+  // PEDRO_END  
   LoaderUtils,
   LoadingManager,
   PMREMGenerator,
@@ -250,6 +253,26 @@ export class Viewer {
         // DRACOLoader.releaseDecoderModule();
 
         resolve(gltf);
+
+        // PEDRO_BEGIN Load lightmaps.
+        console.log("PEDRO - LOADING LIGHTMAPS");
+        let lightmaps = {}
+        gltf.scene.traverse((child) => {
+          if (child.isMesh) {
+            console.log(child.name);
+            let name = getLightMapName(child)
+            console.log(name);
+            if (name) {
+              if (!lightmaps[name]) lightmaps[name] = []
+                lightmaps[name].push(child)
+              }
+            }
+        });
+
+        for (let name in lightmaps) {
+          loadLightmap(name.replace(/ /g, '.'), lightmaps[name])
+        }
+        // PEDRO END
 
       }, undefined, reject);
 
@@ -756,3 +779,51 @@ function isIOS() {
   // iPad on iOS 13 detection
   || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
 }
+
+// PEDRO_BEGIN Adds lightmap loading helper functions.
+function loadLightmap (name, nodes) {
+
+  let texture = KTX2_LOADER.load('./Lightmaps_sdr/' + name + '_denoised_uastc.ktx2', function(texture) {
+    console.log("HERE2");
+    texture.minFilter = LinearFilter
+    texture.magFilter = LinearFilter					
+
+    texture.generateMipmaps = false
+    nodes.forEach(function (node) {
+      let oldMat = node.material
+      node.material = node.material.clone()					
+      node.material.lightMap = texture;
+      node.material.lightMapIntensity = 4;
+
+      if (node.material && node.material.roughnessMap) {
+        node.material.roughnessMap.minFilter = LinearFilter
+        node.material.roughnessMap.magFilter = LinearFilter
+        node.material.roughnessMap.needsUpdate = true
+      }
+      oldMat.dispose()
+    },
+    xhr => {
+      console.log(`HDR ${Math.floor((xhr.loaded / xhr.total) * 100)}% loaded`);
+    },
+    err => {
+      console.log( 'An error happened' );
+      reject(new Error(err));
+    })
+  })	
+}
+
+function getLightMapName (mesh) {
+  
+  let parent = mesh
+  let name = null
+  while (!!parent && !name) {
+    if (parent.userData && parent.userData.TLM_ObjectProperties && parent.userData.TLM_ObjectProperties.tlm_mesh_lightmap_use === 1) {
+      name = parent.userData.name
+    } else {
+      parent = parent.parent
+    }
+  }
+
+  return name
+}
+// PEDRO_END Adds lightmap loading helper functions.
