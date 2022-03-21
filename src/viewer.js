@@ -1,24 +1,37 @@
 import {
+  // PEDRO BEGIN
+  ACESFilmicToneMapping,
+  // PEDRO END
   AmbientLight,
   AnimationMixer,
   AxesHelper,
   Box3,
   Cache,
+  // PEDRO BEGIN
+  Color,
+  // PEDRO END
   DirectionalLight,
   GridHelper,
   HemisphereLight,
+  // PEDRO BEGIN
+  Layers,
+  // PEDRO END
   LinearEncoding,
-  // PEDRO_BEGIN
+  // PEDRO BEGIN
   LinearFilter,
-  // PEDRO_END  
+  // PEDRO END  
   LoaderUtils,
   LoadingManager,
   PMREMGenerator,
   PerspectiveCamera,
   REVISION,
   Scene,
+  ShaderMaterial,
   SkeletonHelper,
   UnsignedByteType,
+  // PEDRO BEGIN
+  Vector2,
+  // PEDRO END
   Vector3,
   WebGLRenderer,
   sRGBEncoding,
@@ -35,6 +48,14 @@ import { GUI } from 'dat.gui';
 
 import { environments } from '../assets/environment/index.js';
 import { createBackground } from '../lib/three-vignette.js';
+import { MeshBasicMaterial } from 'three';
+
+// PEDRO BEGIN Supports bloom pass.
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples//jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples//jsm/postprocessing/ShaderPass.js';
+import { UnrealBloomPass } from 'three/examples//jsm/postprocessing/UnrealBloomPass.js';
+// PEDRO END
 
 const DEFAULT_CAMERA = '[default]';
 
@@ -59,6 +80,10 @@ const MAP_NAMES = [
 ];
 
 const Preset = {ASSET_GENERATOR: 'assetgenerator'};
+
+// PEDRO BEGIN Supports bloom pass.
+const ENTIRE_SCENE = 0, BLOOM_SCENE = 1;
+// PEDRO END
 
 Cache.enabled = true;
 
@@ -95,7 +120,12 @@ export class Viewer {
       directIntensity: 0.8 * Math.PI, // TODO(#116)
       directColor: 0xFFFFFF,
       bgColor1: '#ffffff',
-      bgColor2: '#353535'
+      bgColor2: '#353535',
+
+      // Post process
+      bloomThreshold: 1.5,
+      bloomStrength: 0,
+      bloomRadius: 0
     };
 
     this.prevTime = 0;
@@ -116,12 +146,55 @@ export class Viewer {
     this.renderer = window.renderer = new WebGLRenderer({antialias: true});
     this.renderer.physicallyCorrectLights = true;
     this.renderer.outputEncoding = sRGBEncoding;
-    this.renderer.setClearColor( 0xcccccc );
+    // PEDRO BEGIN
+    this.renderer.toneMapping = ACESFilmicToneMapping;
+    // PEDRO END
+//    this.renderer.setClearColor( 0xcccccc );
+    this.renderer.setClearColor( 0x000000 );
     this.renderer.setPixelRatio( window.devicePixelRatio );
     this.renderer.setSize( el.clientWidth, el.clientHeight );
 
     this.pmremGenerator = new PMREMGenerator( this.renderer );
     this.pmremGenerator.compileEquirectangularShader();
+
+    // PEDRO BEGIN Init bloom pass
+    this.bloomLayer = new Layers();
+		this.bloomLayer.set( BLOOM_SCENE );
+
+    this.darkMaterial = new MeshBasicMaterial( { color: 'black' } );
+		this.materials = {};
+
+    this.renderScene = new RenderPass( this.scene, this.activeCamera );
+
+    this.bloomPass = new UnrealBloomPass( new Vector2( window.innerWidth, window.innerHeight ), 1.5, 0.4, 0.85 );
+    this.bloomPass.threshold = this.state.bloomThreshold;
+    this.bloomPass.strength = this.state.bloomStrength;
+    this.bloomPass.radius = this.state.bloomRadius;
+
+    this.bloomComposer = new EffectComposer( this.renderer );
+    this.bloomComposer.renderToScreen = false;
+    this.bloomComposer.addPass( this.renderScene );
+    this.bloomComposer.addPass( this.bloomPass );
+    this.bloomComposer.setSize( el.clientWidth, el.clientHeight );
+
+    this.finalPass = new ShaderPass(
+			new ShaderMaterial( {
+				uniforms: {
+					baseTexture: { value: null },
+					bloomTexture: { value: this.bloomComposer.renderTarget2.texture }
+				},
+			  vertexShader: document.getElementById( 'vertexshader' ).textContent,
+				fragmentShader: document.getElementById( 'fragmentshader' ).textContent,
+				defines: {}
+			} ), 'baseTexture'
+		);
+		this.finalPass.needsSwap = true;
+
+		this.finalComposer = new EffectComposer( this.renderer );
+		this.finalComposer.addPass( this.renderScene );
+		this.finalComposer.addPass( this.finalPass );
+		this.finalComposer.setSize( el.clientWidth, el.clientHeight );
+    // PEDRO END
 
     this.controls = new OrbitControls( this.defaultCamera, this.renderer.domElement );
     this.controls.autoRotate = false;
@@ -166,21 +239,65 @@ export class Viewer {
     this.controls.update();
     this.stats.update();
     this.mixer && this.mixer.update(dt);
-    this.render();
 
+    this.render();
     this.prevTime = time;
 
   }
 
   render () {
+    // PEDRO BEGIN Adds support for emissive bloom.
+    this.renderBloom (true);
+    this.finalComposer.render();  
+    //this.renderer.render( this.scene, this.activeCamera );
+    // PEDRO END
 
-    this.renderer.render( this.scene, this.activeCamera );
     if (this.state.grid) {
       this.axesCamera.position.copy(this.defaultCamera.position)
       this.axesCamera.lookAt(this.axesScene.position)
       this.axesRenderer.render( this.axesScene, this.axesCamera );
     }
   }
+
+  // PEDRO BEGIN Adds support for emissive bloom.
+  renderBloom( mask ) {
+    if ( mask === true ) {
+
+      // Caches old background reference.
+      var background = this.scene.background;
+
+      // Sets background and any non-bloom objects to black.
+      this.scene.background = null;
+      this.scene.traverse( obj => {
+        if ( obj.isMesh && this.bloomLayer.test( obj.layers ) === false ) {
+          this.materials[ obj.uuid ] = obj.material;
+          obj.material = this.darkMaterial;
+        }      
+      });
+      //this.scene.traverse( darkenNonBloomed );
+
+      // Renders bloomed objects.
+      this.bloomComposer.render();
+
+      // Restores materials on non-bloomed objects.
+      this.scene.background = background;
+      this.scene.traverse( obj => {
+        if ( this.materials[ obj.uuid ] ) {
+
+          obj.material = this.materials[ obj.uuid ];
+          delete this.materials[ obj.uuid ];
+        }
+      });
+      //this.scene.traverse( restoreMaterial );
+    } else {
+
+      this.camera.layers.set( BLOOM_SCENE );
+      this.bloomComposer.render();
+      this.camera.layers.set( ENTIRE_SCENE );
+      
+    }   
+  }
+  // PEDRO END
 
   resize () {
 
@@ -194,6 +311,11 @@ export class Viewer {
     this.axesCamera.aspect = this.axesDiv.clientWidth / this.axesDiv.clientHeight;
     this.axesCamera.updateProjectionMatrix();
     this.axesRenderer.setSize(this.axesDiv.clientWidth, this.axesDiv.clientHeight);
+
+    // PEDRO BEGIN Adds support for bloom pass.
+    this.bloomComposer.setSize( clientWidth, clientHeight );
+		this.finalComposer.setSize( clientWidth, clientHeight );
+    // PEDRO END
   }
 
   load ( url, rootPath, assetMap ) {
@@ -254,21 +376,22 @@ export class Viewer {
 
         resolve(gltf);
 
-        // PEDRO_BEGIN Load lightmaps.
-        console.log("PEDRO - LOADING LIGHTMAPS");
+        // PEDRO_BEGIN Load lightmaps.        
         let lightmaps = {}
         gltf.scene.traverse((child) => {
           if (child.isMesh) {
-            console.log(child.name);
+            if ( child.material.name === "Glow") child.layers.enable( BLOOM_SCENE );
             let name = getLightMapName(child)
-            console.log(name);
             if (name) {
               if (!lightmaps[name]) lightmaps[name] = []
                 lightmaps[name].push(child)
               }
             }
+          else {
+            console.log("NON MESH: " + child.name);    
+          }  
         });
-
+        
         for (let name in lightmaps) {
           loadLightmap(name.replace(/ /g, '.'), lightmaps[name])
         }
@@ -547,6 +670,14 @@ export class Viewer {
     this.vignette.style({colors: [this.state.bgColor1, this.state.bgColor2]});
   }
 
+  // PEDRO BEGIN
+  updateBloom () {
+    this.bloomPass.threshold = this.state.bloomThreshold;
+    this.bloomPass.strength = this.state.bloomStrength;
+    this.bloomPass.radius = this.state.bloomRadius;
+  }
+  // PEDRO END
+
   /**
    * Adds AxesHelper.
    *
@@ -633,6 +764,14 @@ export class Viewer {
     // Camera controls.
     this.cameraFolder = gui.addFolder('Cameras');
     this.cameraFolder.domElement.style.display = 'none';
+
+    // PEDRO BEGIN
+    // Post process controls.
+    this.postProcessFolder = gui.addFolder('Post Process');
+    this.postProcessFolder.add( this.state, 'bloomThreshold', 0.0, 1.0 ).onChange( () => this.updateBloom());
+		this.postProcessFolder.add( this.state, 'bloomStrength', 0.0, 3.0 ).onChange( () => this.updateBloom());
+		this.postProcessFolder.add( this.state, 'bloomRadius', 0.0, 1.0 ).step( 0.01 ).onChange( () => this.updateBloom());
+    // PEDRO END
 
     // Stats.
     const perfFolder = gui.addFolder('Performance');
@@ -780,11 +919,33 @@ function isIOS() {
   || (navigator.userAgent.includes('Mac') && 'ontouchend' in document);
 }
 
-// PEDRO_BEGIN Adds lightmap loading helper functions.
+// PEDRO BEGIN Adds boom render helpers.
+function darkenNonBloomed( obj, bloomLayer ) {
+  console.log("In darkenNonBloomed " + bloomLayer);
+
+  if ( obj.isMesh && bloomLayer.test( obj.layers ) === false ) {
+
+    materials[ obj.uuid ] = obj.material;
+    obj.material = darkMaterial;
+
+  }
+
+}
+
+// PEDRO END
+
+// PEDRO BEGIN Adds lightmap loading helper functions.
 function loadLightmap (name, nodes) {
 
-  let texture = KTX2_LOADER.load('./Lightmaps_sdr/' + name + '_denoised_uastc.ktx2', function(texture) {
-    console.log("HERE2");
+  //console.log("PEDRO - LOADING LIGHTMAP: " + name);
+
+  //const path = './Lightmaps/' + name + '_denoised.exr';
+  const path = './Lightmaps_sdr/' + name + '_denoised_uastc.ktx2';
+
+  let texture = KTX2_LOADER.load(path, function(texture) {
+  //let texture = new RGBELoader().load(path, function(texture) {
+    //console.log("HERE2 " + path);
+    texture.encoding = sRGBEncoding;
     texture.minFilter = LinearFilter
     texture.magFilter = LinearFilter					
 
@@ -792,8 +953,10 @@ function loadLightmap (name, nodes) {
     nodes.forEach(function (node) {
       let oldMat = node.material
       node.material = node.material.clone()					
+      //node.material = new MeshBasicMaterial();					
       node.material.lightMap = texture;
-      node.material.lightMapIntensity = 4;
+//      node.material.lightMapIntensity = 0.6;
+      node.material.lightMapIntensity = 10;
 
       if (node.material && node.material.roughnessMap) {
         node.material.roughnessMap.minFilter = LinearFilter
@@ -801,14 +964,14 @@ function loadLightmap (name, nodes) {
         node.material.roughnessMap.needsUpdate = true
       }
       oldMat.dispose()
-    },
-    xhr => {
-      console.log(`HDR ${Math.floor((xhr.loaded / xhr.total) * 100)}% loaded`);
-    },
-    err => {
-      console.log( 'An error happened' );
-      reject(new Error(err));
-    })
+    })  
+  },
+  xhr => {
+    console.log(`HDR ${Math.floor((xhr.loaded / xhr.total) * 100)}% loaded`);
+  },
+  err => {
+    console.log( 'An error happened' );
+    //reject(new Error(err));
   })	
 }
 
@@ -826,4 +989,4 @@ function getLightMapName (mesh) {
 
   return name
 }
-// PEDRO_END Adds lightmap loading helper functions.
+// PEDRO END Adds lightmap loading helper functions.
